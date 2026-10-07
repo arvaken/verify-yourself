@@ -1,0 +1,3 @@
+# Every file is kept byte for byte, whatever a checkout's line-ending setting: the page states the script's SHA-256,
+# and a clone must hash to it.
+* -text
