@@ -43,7 +43,10 @@ export const PINNED = {
 };
 
 const SIGNED_OBJECT = 'mark.signed-object/1';
-const STATEMENT = 'mark.attestation-signature/1';
+// What an assessor signs: version 1 carries the attestation's identifier; version 2 (D256) its SHA-256 instead, so the
+// statement Rekor's operator receives does not unlock the attestation's page.
+const STATEMENT_V1 = 'mark.attestation-signature/1';
+const STATEMENT_V2 = 'mark.attestation-signature/2';
 const KEY_CERT = 'mark.signing-key/1';
 const ASSESSOR_CERT = 'mark.assessor-cert/1';
 const REVOCATIONS = 'mark.revocations/1';
@@ -91,6 +94,16 @@ function subtle() {
 
 export async function sha256(bytes) {
   return new Uint8Array(await subtle().digest('SHA-256', bytes));
+}
+
+/** Whether a signed statement names the attestation this page states (the record's `names_attestation`): version 1 by
+ *  its identifier; version 2 by its identifier's SHA-256, carrying no identifier. The page computes the hash from its
+ *  own identifier; statement_vectors.json holds this to the record's answers (D256). */
+export async function namesAttestation(obj, attestationId) {
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return false;
+  if (obj.schema === STATEMENT_V1) return obj.attestation_id === attestationId;
+  if (obj.schema !== STATEMENT_V2 || 'attestation_id' in obj) return false;
+  return obj.attestation_id_sha256 === hex(await sha256(new TextEncoder().encode(attestationId)));
 }
 
 // ---- the record's encodings (packages/core/src/bundle.ts) -----------------------------------------------------------
@@ -538,12 +551,13 @@ export async function verifyAttestation(proof, expected, options = {}) {
       if (why) fail(4, why);
       else record(4, n, true, `key ${so.key_id} is ${who}'s, by an assessor certificate the root signed`, { who });
     }
-    if (obj.schema !== STATEMENT || obj.attestation_id !== expected.attestation_id) {
+    if (!(await namesAttestation(obj, expected.attestation_id))) {
       fail(6, 'the signed object is not a signature over this attestation');
     } else if (obj.content_hash !== expected.content_hash) {
       fail(6, `signed content ${obj.content_hash ?? 'None'} is not the attestation's content ${expected.content_hash}`);
     } else {
-      record(6, n, true, `the statement names this attestation (${obj.attestation_id}) and the content hash this page states`);
+      const how = obj.schema === STATEMENT_V2 ? `by its identifier's SHA-256, ${obj.attestation_id_sha256}` : `(${obj.attestation_id})`;
+      record(6, n, true, `the statement names this attestation ${how}, and the content hash this page states`);
     }
     await checkLog(n, receiptsOf(entry), await entryTime(so, receiptsOf(entry), pinned.rekor), out);
     return out;

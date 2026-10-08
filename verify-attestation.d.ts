@@ -41,6 +41,8 @@ export class Unavailable extends Error {}
 export function canonicalJson(value: unknown): string;
 export function keyId(publicKeyHex: string): Promise<string>;
 export function sha256(bytes: Uint8Array): Promise<Uint8Array>;
+/** Whether a signed statement names this attestation: version 1 by its identifier, version 2 by its identifier's SHA-256 (D256). */
+export function namesAttestation(obj: unknown, attestationId: string): Promise<boolean>;
 export function ed25519Available(): Promise<boolean>;
 export function ed25519Verify(signatureHex: string, message: string | Uint8Array, publicKeyHex: string): Promise<boolean>;
 export function leafHash(bodyB64: string): Promise<Uint8Array>;
