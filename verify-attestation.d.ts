@@ -43,6 +43,10 @@ export function keyId(publicKeyHex: string): Promise<string>;
 export function sha256(bytes: Uint8Array): Promise<Uint8Array>;
 /** Whether a signed statement names this attestation: version 1 by its identifier, version 2 by its identifier's SHA-256 (D256). */
 export function namesAttestation(obj: unknown, attestationId: string): Promise<boolean>;
+/** What an assessment report's page states of it, which its signed statement must name (D514). */
+export interface ReportNamed { reference: string; document_sha256: string; exhibit_a_sha256: string; describes_setup_as_of: string }
+/** Whether a signed statement is of an assessment report and names this one (D514). */
+export function namesReport(obj: unknown, expected: ReportNamed): Promise<boolean>;
 export function ed25519Available(): Promise<boolean>;
 export function ed25519Verify(signatureHex: string, message: string | Uint8Array, publicKeyHex: string): Promise<boolean>;
 export function leafHash(bodyB64: string): Promise<Uint8Array>;
@@ -62,14 +66,14 @@ export function entryTime(so: unknown, receipts: unknown[], keys?: RekorKey[]): 
 export interface KeyJudgment {
   judged_at: string;
   external: boolean;
-  /** 'ok', or the record's reason: schema, root, cert-not-yet-valid, cert-expired, revoked, key, signature */
+  /** 'ok', or the record's reason: schema, type, root, cert-not-yet-valid, cert-expired, revoked, key, signature */
   verdict: string;
   detail: string | null;
   refused: string[];
   entry: unknown;
 }
 export function keyJudgment(so: unknown, root: { public_key: string; revocations?: unknown; id?: string }, receipts: unknown[], now: Date,
-                            options?: { keys?: RekorKey[]; served?: unknown[] }): Promise<KeyJudgment>;
+                            options?: { keys?: RekorKey[]; served?: unknown[]; purpose?: 'attestation' | 'assessment report' }): Promise<KeyJudgment>;
 
 export interface Step { step: number; signature: number | null; ok: boolean | null; text: string; facts: Record<string, unknown> }
 /** A step in plain words, for the page and the command line; `text` is the technical account beneath it. */
@@ -85,3 +89,9 @@ export function verifyAttestation(proof: unknown, expected: { attestation_id: st
                                   options?: { pinned?: { roots: Root[]; rekor: RekorKey[] }; at?: Date; live?: boolean;
                                               fetch?: (url: string) => Promise<{ status: number; json(): Promise<unknown> }>;
                                               requireLog?: boolean; onStep?: (s: Step) => void }): Promise<Verdict>;
+/** The same seven steps for an assessment report's public page (D514): two certified assessors, each key certified to
+ *  sign an assessment report. */
+export function verifyReport(proof: unknown, expected: ReportNamed,
+                             options?: { pinned?: { roots: Root[]; rekor: RekorKey[] }; at?: Date; live?: boolean;
+                                         fetch?: (url: string) => Promise<{ status: number; json(): Promise<unknown> }>;
+                                         requireLog?: boolean; onStep?: (s: Step) => void }): Promise<Verdict>;

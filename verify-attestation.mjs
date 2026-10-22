@@ -16,6 +16,11 @@
  * Arvaken's record's; that each assessor's key is on a hardware token (the record checks the device's attestation
  * chain); and that the content hash is the hash of a document, until the document is published (D247, 2).
  *
+ * An assessment report (D514) is checked by the same seven steps (`verifyReport`): both founders' signatures, each key's
+ * certificate a version-2 one that lists "assessment report" (D324, Q2, 1: "certificates list the types each key may
+ * sign; both checkers refuse a type mismatch"), and a statement of the type "assessment report" naming the report's
+ * reference by its SHA-256 and the report and its Exhibit A by theirs. Nothing of a report's content reaches the script.
+ *
  * When a key is judged (D250, applying D189's rule): at the earliest time the signature's own Rekor entry proves, not
  * when the check runs; with no such entry, when it runs. A revoked key's signature counts only when that entry's time
  * precedes the revocation's "compromised from" date. `keyJudgment` is that rule, held to the record's Python
@@ -48,6 +53,15 @@ const SIGNED_OBJECT = 'mark.signed-object/1';
 const STATEMENT_V1 = 'mark.attestation-signature/1';
 const STATEMENT_V2 = 'mark.attestation-signature/2';
 const KEY_CERT = 'mark.signing-key/1';
+// Version 2 lists the documents its key may sign, in place of a purpose (D324, Q2, 1; D514): mark_ledger.keys's rule.
+const KEY_CERT_V2 = 'mark.signing-key/2';
+const DOCUMENT_TYPES = ['attestation', 'assessment report'];
+// What both assessors sign for an assessment report (D514): its type, its reference's SHA-256, the two files' SHA-256 and
+// the date it describes, and nothing of its content.
+const REPORT_STATEMENT = 'mark.report-signature/1';
+const REPORT_TYPE = 'assessment report';
+const REPORT_FIELDS = ['describes_setup_as_of', 'document_sha256', 'document_type', 'exhibit_a_sha256', 'issued_at',
+  'reference_sha256', 'schema'];
 const ASSESSOR_CERT = 'mark.assessor-cert/1';
 const REVOCATIONS = 'mark.revocations/1';
 const SKEW_MS = 5 * 60_000;
@@ -104,6 +118,23 @@ export async function namesAttestation(obj, attestationId) {
   if (obj.schema === STATEMENT_V1) return obj.attestation_id === attestationId;
   if (obj.schema !== STATEMENT_V2 || 'attestation_id' in obj) return false;
   return obj.attestation_id_sha256 === hex(await sha256(new TextEncoder().encode(attestationId)));
+}
+
+const HASH = /^[0-9a-f]{64}$/;
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Whether a signed statement names this assessment report (D514; mark_product.report.names_report): exactly the
+ *  report statement's fields, the type "assessment report", the SHA-256 of the reference the page states, and the two
+ *  SHA-256 and the date the page states. report_statement_vectors.json holds this to the record's answers. */
+export async function namesReport(obj, expected) {
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return false;
+  if (Object.keys(obj).sort().join() !== REPORT_FIELDS.join()) return false;
+  if (obj.schema !== REPORT_STATEMENT || obj.document_type !== REPORT_TYPE) return false;
+  for (const k of ['reference_sha256', 'document_sha256', 'exhibit_a_sha256']) if (!HASH.test(String(obj[k]))) return false;
+  if (!DAY.test(String(obj.describes_setup_as_of))) return false;
+  return obj.reference_sha256 === hex(await sha256(new TextEncoder().encode(expected.reference)))
+    && obj.document_sha256 === expected.document_sha256 && obj.exhibit_a_sha256 === expected.exhibit_a_sha256
+    && obj.describes_setup_as_of === expected.describes_setup_as_of;
 }
 
 // ---- the record's encodings (packages/core/src/bundle.ts) -----------------------------------------------------------
@@ -198,13 +229,30 @@ function refusedSince(since, external) {
   return `compromised from ${from}, and this signature's external timestamp ${external.toISOString()} is not before it`;
 }
 
-/** verify_signed_object's judgment at `at`, for purpose 'attestation', in its order and with its reasons: [reason,
- *  detail], or null when it verifies. A revocation's "compromised from" is read against `external`. */
-async function signedObjectVerdict(so, root, revocations, at, external) {
+/** What is wrong with a version-2 certificate's list of document types, or null (mark_ledger.keys.document_types_problem). */
+function documentTypesProblem(c) {
+  if ('purpose' in c) return 'a version-2 key certificate lists document_types and names no purpose';
+  const t = c.document_types;
+  if (!Array.isArray(t) || t.length === 0) return 'a version-2 key certificate lists the document types its key may sign';
+  if (t.some((x) => !DOCUMENT_TYPES.includes(x)) || new Set(t).size !== t.length) return 'document_types must be distinct types';
+  return null;
+}
+
+const aPurpose = (p) => (p === REPORT_TYPE ? 'an assessment report' : p === 'attestation' ? 'an attestation' : `'${p}'`);
+
+/** verify_signed_object's judgment at `at`, for `purpose` ('attestation' or 'assessment report'), in its order and with
+ *  its reasons: [reason, detail], or null when it verifies. A revocation's "compromised from" is read against `external`. */
+async function signedObjectVerdict(so, root, revocations, at, external, purpose = 'attestation') {
   const skc = so.key_cert;
   const c = isObject(skc) ? skc.cert : null;
-  if (!isObject(c) || c.schema !== KEY_CERT) return ['schema', 'key certificate missing or malformed'];
-  if (c.purpose !== 'attestation') return ['schema', `certificate purpose ${c.purpose} is not attestation`];
+  if (!isObject(c) || (c.schema !== KEY_CERT && c.schema !== KEY_CERT_V2)) return ['schema', 'key certificate missing or malformed'];
+  if (c.schema === KEY_CERT_V2) {
+    if (documentTypesProblem(c)) return ['schema', 'key certificate missing or malformed'];
+    if (!c.document_types.includes(purpose)) return ['type', `the key's certificate does not let it sign ${aPurpose(purpose)}`];
+  } else if (purpose === REPORT_TYPE) {
+    // Only a version-2 certificate lists the assessment report (D514): a version-1 one never lets its key sign one.
+    return ['type', `the key's certificate does not let it sign ${aPurpose(purpose)}`];
+  } else if (c.purpose !== purpose) return ['schema', `certificate purpose ${c.purpose} is not ${purpose}`];
   if (c.root_id !== root.id) return ['root', 'certificate was issued under a different root'];
   if (typeof c.public_key !== 'string' || c.key_id !== (await keyId(c.public_key).catch(() => null))) {
     return ['schema', 'certificate key_id does not match its public key'];
@@ -253,12 +301,12 @@ export async function entryTime(so, receipts, keys = PINNED.rekor) {
  * root: { public_key, revocations? }; receipts: the signature's Rekor receipts; now: when the check runs.
  * Returns { judged_at, external, verdict: 'ok' or the record's reason, detail, refused, entry }.
  */
-export async function keyJudgment(so, root, receipts, now, { keys = PINNED.rekor, served = [] } = {}) {
+export async function keyJudgment(so, root, receipts, now, { keys = PINNED.rekor, served = [], purpose = 'attestation' } = {}) {
   const r = { ...root, id: root.id ?? await keyId(root.public_key) };
   const { entry, refused } = await entryTime(so, receipts, keys);
   const external = entry ? new Date(entry.integrated_time * 1000) : null;
   const at = external ?? now;
-  const v = await signedObjectVerdict(so, r, await revocationsUnder(r, r.id, served), at, external);
+  const v = await signedObjectVerdict(so, r, await revocationsUnder(r, r.id, served), at, external, purpose);
   return { judged_at: at.toISOString(), external: external !== null, verdict: v ? v[0] : 'ok', detail: v ? v[1] : null,
            refused, entry };
 }
@@ -480,17 +528,51 @@ export const requiredAssessors = (audience) => (audience === 'internal' ? 1 : 2)
  * The steps are numbered as the plan's list (CONSOLE-PLAN.md part 12, F3(b)).
  */
 export async function verifyAttestation(proof, expected, options = {}) {
+  return verifyDocument(proof, {
+    needed: requiredAssessors(expected.audience), purpose: 'attestation', kind: 'attestation',
+    async names(obj) {
+      if (!(await namesAttestation(obj, expected.attestation_id))) return [false, 'the signed object is not a signature over this attestation'];
+      if (obj.content_hash !== expected.content_hash) {
+        return [false, `signed content ${obj.content_hash ?? 'None'} is not the attestation's content ${expected.content_hash}`];
+      }
+      const how = obj.schema === STATEMENT_V2 ? `by its identifier's SHA-256, ${obj.attestation_id_sha256}` : `(${obj.attestation_id})`;
+      return [true, `the statement names this attestation ${how}, and the content hash this page states`];
+    },
+  }, options);
+}
+
+/**
+ * Check what an assessment report's public page serves (D514): the same seven steps, for the document type "assessment
+ * report". Both founders sign a report, so two certified assessors are needed; each key's certificate must list the type.
+ *
+ * proof:    as an attestation's: /reports/<reference>/proof.
+ * expected: { reference, document_sha256, exhibit_a_sha256, describes_setup_as_of }, read from the page.
+ */
+export async function verifyReport(proof, expected, options = {}) {
+  // PUBLIC TEXT: approved by the founder's click at 17:01:14 UTC on 22 October 2026 (D515), the words in full inside the question.
+  return verifyDocument(proof, {
+    needed: 2, purpose: REPORT_TYPE, kind: 'report',
+    async names(obj) {
+      if (!(await namesReport(obj, expected))) return [false, 'the signed statement is not this assessment report'];
+      return [true, `the statement is of an assessment report and names this one by its reference's SHA-256, `
+        + `${obj.reference_sha256}, with the SHA-256 of the report and of its Exhibit A this page states`];
+    },
+  }, options);
+}
+
+async function verifyDocument(proof, { needed, purpose, kind, names }, options) {
   const { pinned = PINNED, at = new Date(), live = false, fetch: fetchFn = globalThis.fetch, requireLog = false,
           onStep = () => {} } = options;
   const steps = [];
   const record = (step, signature, ok, text, facts = {}) => {
-    const s = { step, signature, ok, text, facts };
+    // An attestation's steps are as they were before reports; a report's say which kind they are, for plainLine.
+    const s = { step, signature, ok, text, facts: kind === 'report' ? { kind, ...facts } : facts };
     steps.push(s);
     onStep(s);
     return ok;
   };
-  const needed = requiredAssessors(expected.audience);
   const result = (verdict, signatures, assessors) => ({ verdict, needed, assessors, signatures, steps });
+  const what = purpose === REPORT_TYPE ? 'assessment reports' : 'attestations';
 
   if (!(await ed25519Available())) {
     record(1, null, null, 'This browser cannot check Ed25519 signatures, so nothing was checked. A current browser can.');
@@ -517,7 +599,7 @@ export async function verifyAttestation(proof, expected, options = {}) {
   async function checkOne(n, entry) {
     const so = isObject(entry) ? entry.signed_object : null;
     const out = { key_id: null, assessor: null, problems: [], log: null };
-    const fail = (step, text) => { out.problems.push(text); record(step, n, false, text); };
+    const fail = (step, text, facts = {}) => { out.problems.push(text); record(step, n, false, text, facts); };
     if (!isObject(so) || so.schema !== SIGNED_OBJECT || !isObject(so.object) || typeof so.signature !== 'string'
         || typeof so.key_id !== 'string' || !('key_cert' in so)) {
       fail(1, 'malformed signed object: not a mark.signed-object/1 with an object, a signature, a key_id and a key_cert');
@@ -532,16 +614,17 @@ export async function verifyAttestation(proof, expected, options = {}) {
     } else {
       record(3, n, true, `the key's certificate names Arvaken's root ${root.id}, the one this script pins`);
       const revocations = await revocationsUnder(root, root.id, proof.revocations);
-      const j = await keyJudgment(so, root, receiptsOf(entry), at, { keys: pinned.rekor, served: proof.revocations });
+      const j = await keyJudgment(so, root, receiptsOf(entry), at, { keys: pinned.rekor, served: proof.revocations, purpose });
       const external = j.external ? new Date(j.judged_at) : null;
       const when = external ? `at ${j.judged_at}, the time its Rekor entry proves` : 'now, as no Rekor entry proves an earlier time';
       const [wellFormed, instant] = issuedAt(obj);
       if (!wellFormed) {
         fail(2, 'does not verify (schema): issued_at must be YYYY-MM-DDTHH:MM:SS.mmmZ');
       } else if (j.verdict !== 'ok' && j.verdict !== 'signature') {
-        fail(2, `does not verify (${j.verdict}): ${j.detail}`);
+        // For a report, the type's refusal: PUBLIC TEXT: approved by the founder's click at 17:01:14 UTC on 22 October 2026 (D515), the words in full inside the question.
+        fail(2, `does not verify (${j.verdict}): ${j.detail}`, { reason: j.verdict });
       } else {
-        record(2, n, true, `key ${cert.key_id} is certified by the root for attestations, from ${cert.not_before} to ${cert.not_after}, judged ${when}`,
+        record(2, n, true, `key ${cert.key_id} is certified by the root for ${what}, from ${cert.not_before} to ${cert.not_after}, judged ${when}`,
                { judged: external ? 'entry' : 'now' });
         if (j.verdict === 'signature') fail(1, `does not verify (signature): ${j.detail}`);
         else record(1, n, true, `the Ed25519 signature over the statement verifies under key ${cert.key_id}`);
@@ -551,14 +634,9 @@ export async function verifyAttestation(proof, expected, options = {}) {
       if (why) fail(4, why);
       else record(4, n, true, `key ${so.key_id} is ${who}'s, by an assessor certificate the root signed`, { who });
     }
-    if (!(await namesAttestation(obj, expected.attestation_id))) {
-      fail(6, 'the signed object is not a signature over this attestation');
-    } else if (obj.content_hash !== expected.content_hash) {
-      fail(6, `signed content ${obj.content_hash ?? 'None'} is not the attestation's content ${expected.content_hash}`);
-    } else {
-      const how = obj.schema === STATEMENT_V2 ? `by its identifier's SHA-256, ${obj.attestation_id_sha256}` : `(${obj.attestation_id})`;
-      record(6, n, true, `the statement names this attestation ${how}, and the content hash this page states`);
-    }
+    const [named, text] = await names(obj);
+    if (named) record(6, n, true, text);
+    else fail(6, text);
     await checkLog(n, receiptsOf(entry), await entryTime(so, receiptsOf(entry), pinned.rekor), out);
     return out;
   }
@@ -601,6 +679,10 @@ export function plainLine(step) {
       return ok === true ? 'The signature is genuine'
         : ok === null ? 'The signature could not be checked in this browser' : 'The signature is not genuine';
     case 2:
+      // A report's lines here and at step 6: PUBLIC TEXT: approved by the founder's click at 17:01:14 UTC on 22 October 2026 (D515), the words in full inside the question.
+      if (ok !== true && f.reason === 'type') {
+        return `The key's certificate does not let it sign ${f.kind === 'report' ? 'an assessment report' : 'an attestation'}`;
+      }
       if (ok !== true) return "The key was not certified by Arvaken's root when it signed";
       return f.judged === 'entry' ? "The key was certified by Arvaken's root when it signed"
         : "The key is certified by Arvaken's root now; no public log entry shows when it signed";
@@ -611,6 +693,7 @@ export function plainLine(step) {
     case 5:
       return `${f.counted} of the ${f.needed} certified assessors it needs signed it`;
     case 6:
+      if (f.kind === 'report') return ok === true ? 'This is the report named on this page' : 'What was signed is not the report named on this page';
       return ok === true ? 'This is the attestation named on this page' : 'What was signed is not the attestation named on this page';
     case 7:
       return f.log === 'logged' ? "The signature is in Rekor's public log"
